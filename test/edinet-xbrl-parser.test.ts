@@ -113,13 +113,18 @@ describe("EdinetXbrlParser", () => {
         const yahoo = parser.parse(xmlYahoo);
         const ym = yahoo.getKeyMetrics();
         expect(ym.netSales).toBe(853730000000); // IFRS 連結収益
-        expect(ym.operatingIncome).toBe(185012000000);
+        // このファイルの連結営業利益は企業固有拡張タグ(jpcrp030000-asr_...:OperatingIncomeIFRSSummaryOfBusinessResults)
+        // にのみ存在し、既知タグ候補では検出できない。修正前は連結側に見つからず単体値(185,012,000,000円)に
+        // 誤ってフォールバックしていたが、修正後は単体へのフォールバックをせずundefinedを返す（issue #7）。
+        expect(ym.operatingIncome).toBeUndefined();
         expect(ym.netAssets).toBe(930820000000); // IFRS 連結資本
 
         // 新しい指標のチェック (debug/grep から導出)
         // Yahooはこのファイルで非連結を使用
         // EPS: 23.72
         expect(ym.earningsPerShare).toBe(23.99); // IFRS EPS
+        // 1株当たり指標は決算短信様式の慣習上、単体コンテキストにのみ記載されることが多いため、
+        // 従来通り連結→単体のフラット探索を維持し、単体値(150.59)も採用する（issue #7の対象外）。
         expect(ym.bookValuePerShare).toBe(150.59); // grepから
         expect(ym.numberOfIssuedShares).toBe(5695577000);
         expect(ym.equityToTotalAssetsRatio).toBeCloseTo(0.607, 3); // IFRS 連結比率

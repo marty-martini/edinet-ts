@@ -131,6 +131,25 @@ describe("EdinetXbrlObject", () => {
             expect(metrics.netSales).toBe(9999);
             expect(metrics.netIncome).toBe(888);
         });
+
+        /**
+         * IFRS企業のように連結コンテキストに対象タグが1件も無い場合、
+         * 単体コンテキストの値を誤って返さず undefined になることを確認します（issue #7）。
+         */
+        it("does not fall back to NonConsolidated value when Consolidated context exists but lacks the tag", () => {
+            const consCtx = { id: "cons_2024", period: { startDate: "2023-04-01", endDate: "2024-03-31" }, scope: "Consolidated", dimensions: [] } as any;
+            const nonConsCtx = { id: "non_2024", period: { startDate: "2023-04-01", endDate: "2024-03-31" }, scope: "NonConsolidated", dimensions: ["NonConsolidatedMember"] } as any;
+
+            xbrlObject.addContext(consCtx);
+            xbrlObject.addContext(nonConsCtx);
+
+            // 連結コンテキストには jppfs_cor:NetSales が存在せず（IFRS企業でよくあるケース）、
+            // 単体コンテキストにのみ存在する状況を再現する。
+            xbrlObject.put("jppfs_cor:NetSales", new EdinetData("jppfs_cor:NetSales", "500", 0, "JPY", "non_2024"));
+
+            const metrics = xbrlObject.getKeyMetrics();
+            expect(metrics.netSales).toBeUndefined();
+        });
     });
 
     describe("getQualitativeInfo", () => {

@@ -162,24 +162,34 @@ export class EdinetXbrlObject {
             });
         }
 
-        const durationContexts = [
-            ...filterRecent(this.findContexts({ type: "Duration", scope: "Consolidated" })),
-            ...filterRecent(this.findContexts({ type: "Duration", scope: "NonConsolidated" })),
-            // レガシー/ハードコードされたIDへのフォールバック
-            { id: "CurrentYearDuration", period: {}, scope: "Consolidated" } as EdinetContext,
-            { id: "CurrentYearDuration_NonConsolidatedMember", period: {}, scope: "NonConsolidated" } as EdinetContext
+        // 連結グループと単体グループを分けて保持します。
+        // 連結コンテキストが実在する場合はそのグループ内だけで全タグを試し、
+        // 見つからなければ（単体にフォールバックせず）undefinedとします。
+        // 連結コンテキストが1件も無い企業の場合のみ、単体グループにフォールバックします。
+        // これにより、連結コンテキストは存在するのに対象タグが無いIFRS企業などで、
+        // 単体側にたまたま存在する値を誤って返してしまうことを防ぎます（issue #7）。
+        const durationGroups = [
+            filterRecent(this.findContexts({ type: "Duration", scope: "Consolidated" })).map(c => c.id),
+            filterRecent(this.findContexts({ type: "Duration", scope: "NonConsolidated" })).map(c => c.id)
         ];
+        // レガシー/ハードコードされたIDへのフォールバック（実コンテキストが1件も見つからない場合の最終手段）
+        const durationLegacyIds = ["CurrentYearDuration", "CurrentYearDuration_NonConsolidatedMember"];
 
-        const instantContexts = [
-            ...filterRecent(this.findContexts({ type: "Instant", scope: "Consolidated" })),
-            ...filterRecent(this.findContexts({ type: "Instant", scope: "NonConsolidated" })),
-            // レガシー/ハードコードされたIDへのフォールバック
-            { id: "CurrentYearInstant", period: {}, scope: "Consolidated" } as EdinetContext,
-            { id: "CurrentYearInstant_NonConsolidatedMember", period: {}, scope: "NonConsolidated" } as EdinetContext
+        const instantGroups = [
+            filterRecent(this.findContexts({ type: "Instant", scope: "Consolidated" })).map(c => c.id),
+            filterRecent(this.findContexts({ type: "Instant", scope: "NonConsolidated" })).map(c => c.id)
         ];
+        const instantLegacyIds = ["CurrentYearInstant", "CurrentYearInstant_NonConsolidatedMember"];
 
-        const durationIds = durationContexts.map(c => c.id);
-        const instantIds = instantContexts.map(c => c.id);
+        const durationIds: [string[][], string[]] = [durationGroups, durationLegacyIds];
+        const instantIds: [string[][], string[]] = [instantGroups, instantLegacyIds];
+
+        // 1株当たり指標・発行済株式数・配当・比率系は、決算短信様式の慣習上、
+        // 連結決算を提出している企業でも値そのものが単体(NonConsolidatedMember)コンテキストにのみ
+        // 記載されることが多いため、上記の厳格な連結優先探索は適用せず、
+        // 従来通り連結→単体の順にフラットに探索します（単体でも見つかった値を採用）。
+        const durationIdsFlat = [...durationGroups[0], ...durationGroups[1], ...durationLegacyIds];
+        const instantIdsFlat = [...instantGroups[0], ...instantGroups[1], ...instantLegacyIds];
 
         return {
             netSales: this.getNumberValue(["jppfs_cor:NetSales", "jpcrp_cor:NetSales", "jpcrp_cor:RevenueIFRSSummaryOfBusinessResults"], durationIds),
@@ -195,19 +205,19 @@ export class EdinetXbrlObject {
             financingCashFlow: this.getNumberValue(["jppfs_cor:NetCashProvidedByUsedInFinancingActivities", "jpcrp_cor:NetCashProvidedByUsedInFinancingActivitiesSummaryOfBusinessResults", "jpcrp_cor:CashFlowsFromUsedInFinancingActivitiesIFRSSummaryOfBusinessResults"], durationIds),
             cashAndEquivalents: this.getNumberValue(["jppfs_cor:CashAndCashEquivalents", "jppfs_cor:CashAndCashEquivalentsEndOfPeriod", "jpcrp_cor:CashAndCashEquivalentsIFRSSummaryOfBusinessResults"], instantIds),
 
-            // Per Share
-            earningsPerShare: this.getNumberValue(["jppfs_cor:BasicEarningsLossPerShare", "jpcrp_cor:BasicEarningsLossPerShareSummaryOfBusinessResults", "jpcrp_cor:BasicEarningsLossPerShareIFRSSummaryOfBusinessResults"], durationIds),
-            bookValuePerShare: this.getNumberValue(["jppfs_cor:NetAssetsPerShare", "jpcrp_cor:NetAssetsPerShareSummaryOfBusinessResults", "jpcrp_cor:EquityAttributableToOwnersOfParentPerShareIFRSSummaryOfBusinessResults"], instantIds),
+            // Per Share（決算短信様式の慣習上、単体コンテキストにのみ記載されることが多いためフラット探索）
+            earningsPerShare: this.getNumberValueFlat(["jppfs_cor:BasicEarningsLossPerShare", "jpcrp_cor:BasicEarningsLossPerShareSummaryOfBusinessResults", "jpcrp_cor:BasicEarningsLossPerShareIFRSSummaryOfBusinessResults"], durationIdsFlat),
+            bookValuePerShare: this.getNumberValueFlat(["jppfs_cor:NetAssetsPerShare", "jpcrp_cor:NetAssetsPerShareSummaryOfBusinessResults", "jpcrp_cor:EquityAttributableToOwnersOfParentPerShareIFRSSummaryOfBusinessResults"], instantIdsFlat),
 
-            // Ratios & Types
-            equityToTotalAssetsRatio: this.getNumberValue(["jpcrp_cor:EquityToAssetRatioSummaryOfBusinessResults", "jpcrp_cor:EquityToTotalAssetsRatioSummaryOfBusinessResults", "jppfs_cor:EquityToTotalAssetsRatio", "jpcrp_cor:RatioOfOwnersEquityToGrossAssetsIFRSSummaryOfBusinessResults"], instantIds),
-            rateOfReturnOnEquity: this.getNumberValue(["jpcrp_cor:RateOfReturnOnEquitySummaryOfBusinessResults", "jpcrp_cor:RateOfReturnOnEquityIFRSSummaryOfBusinessResults", "jppfs_cor:RateOfReturnOnEquity"], durationIds),
-            priceEarningsRatio: this.getNumberValue(["jpcrp_cor:PriceEarningsRatioSummaryOfBusinessResults", "jpcrp_cor:PriceEarningsRatioIFRSSummaryOfBusinessResults"], durationIds), // Less common in XBRL
-            payoutRatio: this.getNumberValue(["jpcrp_cor:PayoutRatioSummaryOfBusinessResults", "jpcrp_cor:PayoutRatioIFRSSummaryOfBusinessResults"], durationIds),
+            // Ratios & Types（同上）
+            equityToTotalAssetsRatio: this.getNumberValueFlat(["jpcrp_cor:EquityToAssetRatioSummaryOfBusinessResults", "jpcrp_cor:EquityToTotalAssetsRatioSummaryOfBusinessResults", "jppfs_cor:EquityToTotalAssetsRatio", "jpcrp_cor:RatioOfOwnersEquityToGrossAssetsIFRSSummaryOfBusinessResults"], instantIdsFlat),
+            rateOfReturnOnEquity: this.getNumberValueFlat(["jpcrp_cor:RateOfReturnOnEquitySummaryOfBusinessResults", "jpcrp_cor:RateOfReturnOnEquityIFRSSummaryOfBusinessResults", "jppfs_cor:RateOfReturnOnEquity"], durationIdsFlat),
+            priceEarningsRatio: this.getNumberValueFlat(["jpcrp_cor:PriceEarningsRatioSummaryOfBusinessResults", "jpcrp_cor:PriceEarningsRatioIFRSSummaryOfBusinessResults"], durationIdsFlat), // Less common in XBRL
+            payoutRatio: this.getNumberValueFlat(["jpcrp_cor:PayoutRatioSummaryOfBusinessResults", "jpcrp_cor:PayoutRatioIFRSSummaryOfBusinessResults"], durationIdsFlat),
 
-            // Shares
-            numberOfIssuedShares: this.getNumberValue(["jpcrp_cor:TotalNumberOfIssuedSharesSummaryOfBusinessResults", "jppfs_cor:TotalNumberOfIssuedShares"], instantIds),
-            dividendPaidPerShare: this.getNumberValue(["jpcrp_cor:DividendPaidPerShareSummaryOfBusinessResults"], durationIds)
+            // Shares（同上）
+            numberOfIssuedShares: this.getNumberValueFlat(["jpcrp_cor:TotalNumberOfIssuedSharesSummaryOfBusinessResults", "jppfs_cor:TotalNumberOfIssuedShares"], instantIdsFlat),
+            dividendPaidPerShare: this.getNumberValueFlat(["jpcrp_cor:DividendPaidPerShareSummaryOfBusinessResults"], durationIdsFlat)
         };
     }
 
@@ -282,7 +292,35 @@ export class EdinetXbrlObject {
         return candidates.slice(offset);
     }
 
-    private getNumberValue(keys: string[], contextRefs: string[]): number | undefined {
+    /**
+     * コンテキストIDのグループ（例: [連結コンテキスト群, 単体コンテキスト群]）を順に探索します。
+     *
+     * 実在するコンテキストを持つ最初のグループが見つかった時点で、そのグループ内の
+     * 全コンテキスト×全タグを試し尽くし、そこで探索を打ち切ります（見つからなければundefined）。
+     * これにより、例えば連結コンテキストは存在するのに対象タグが無いIFRS企業などで、
+     * 単体側にたまたま存在する値を誤って返してしまうことを防ぎます（issue #7）。
+     *
+     * どのグループにも実コンテキストが無い場合のみ、レガシー/ハードコードされたID
+     * （`legacyContextRefs`）を最終手段として試します。
+     */
+    private getNumberValue(keys: string[], [contextGroups, legacyContextRefs]: [string[][], string[]]): number | undefined {
+        for (const group of contextGroups) {
+            if (group.length === 0) continue;
+            return this.getNumberValueFlat(keys, group);
+        }
+
+        return this.getNumberValueFlat(keys, legacyContextRefs);
+    }
+
+    /**
+     * コンテキストIDのフラットなリストを先頭から順に探索し、
+     * 各コンテキストで全タグ候補を試します（従来からの探索方式）。
+     *
+     * 1株当たり指標・発行済株式数・配当・比率系など、決算短信様式の慣習上、
+     * 連結決算を提出している企業でも値そのものが単体コンテキストにのみ記載される
+     * 指標に使用します。連結を優先しつつ、見つからなければ単体の値も採用します。
+     */
+    private getNumberValueFlat(keys: string[], contextRefs: string[]): number | undefined {
         for (const contextRef of contextRefs) {
             for (const key of keys) {
                 const data = this.getDataByContextRef(key, contextRef);
