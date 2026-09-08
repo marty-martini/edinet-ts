@@ -115,6 +115,18 @@ export class EdinetXbrlObject {
         return list.find((d) => d.contextRef === contextRef) || null;
     }
 
+    /**
+     * 名前空間に依存せず、タグ名とコンテキストIDでデータを検索します。
+     * 四半期・半期報告書などで企業独自の名前空間拡張（例: "jpcrp040300-q2r_E39268-000:BusinessRevenue"）
+     * にタグ付けされた値も、タグ名（名前空間なし）が一致すれば取得できます。
+     */
+    private getDataByContextRefAnyNamespace(tagName: string, contextRef: string): EdinetData | null {
+        for (const data of this.getDataListByTagName(tagName)) {
+            if (data.contextRef === contextRef) return data;
+        }
+        return null;
+    }
+
     public getKeys(): string[] {
         return Array.from(this._dataMap.keys());
     }
@@ -192,9 +204,19 @@ export class EdinetXbrlObject {
         const instantIdsFlat = [...instantGroups[0], ...instantGroups[1], ...instantLegacyIds];
 
         return {
-            netSales: this.getNumberValue(["jppfs_cor:NetSales", "jpcrp_cor:NetSales", "jpcrp_cor:RevenueIFRSSummaryOfBusinessResults"], durationIds),
-            operatingIncome: this.getNumberValue(["jppfs_cor:OperatingIncome", "jpcrp_cor:OperatingIncomeIFRSSummaryOfBusinessResults"], durationIds), // Note: OperatingIncome might be company-specific in IFRS
+            // 銀行・リース・人材派遣業などは「売上高」の代わりに「営業収益」(OperatingRevenue)を、
+            // 投資法人はファンド用タクソノミの OperatingRevenueFND を用いる。
+            // また四半期・半期報告書や、トヨタ自動車のようなIFRS大企業では企業独自の
+            // 名前空間拡張タグ（例: "BusinessRevenue", "TotalNetRevenuesIFRS", "SalesRevenuesIFRS"）が
+            // 使われることがあるため、":" を含まない名前空間非依存のタグ名としても検索する。
+            netSales: this.getNumberValue(["jppfs_cor:NetSales", "jpcrp_cor:NetSales", "jpcrp_cor:RevenueIFRSSummaryOfBusinessResults", "jppfs_cor:OperatingRevenue", "jppfs_cor:OperatingRevenueFND", "BusinessRevenue", "TotalNetRevenuesIFRS", "SalesRevenuesIFRS"], durationIds),
+            // jpigp_cor:OperatingProfitLossIFRS はIFRS基準の連結損益計算書における営業利益の標準タグ（トヨタ自動車等）
+            operatingIncome: this.getNumberValue(["jppfs_cor:OperatingIncome", "jpcrp_cor:OperatingIncomeIFRSSummaryOfBusinessResults", "jpigp_cor:OperatingProfitLossIFRS"], durationIds), // Note: OperatingIncome might be company-specific in IFRS
             ordinaryIncome: this.getNumberValue(["jppfs_cor:OrdinaryIncome"], durationIds), // IFRS doesn't usually have OrdinaryIncome
+            // 税引前利益（税引前当期純利益）はJ-GAAP・IFRSどちらの基準にも存在する共通の概念。
+            // 経常利益（ordinaryIncome）とは異なる（経常利益は特別損益を含まないJ-GAAP特有の区分で、
+            // IFRSには存在しない）ため、混同を避けるために別フィールドとして提供する。
+            profitBeforeTax: this.getNumberValue(["jppfs_cor:IncomeBeforeIncomeTaxes", "jpigp_cor:ProfitLossBeforeTaxIFRS", "jpcrp_cor:ProfitLossBeforeTaxIFRSSummaryOfBusinessResults"], durationIds),
             netIncome: this.getNumberValue(["jppfs_cor:ProfitLossAttributableToOwnersOfParent", "jpcrp_cor:ProfitLossAttributableToOwnersOfParentIFRSSummaryOfBusinessResults"], durationIds),
             netAssets: this.getNumberValue(["jppfs_cor:NetAssets", "jpcrp_cor:EquityAttributableToOwnersOfParentIFRSSummaryOfBusinessResults"], instantIds),
             totalAssets: this.getNumberValue(["jppfs_cor:Assets", "jpcrp_cor:TotalAssetsIFRSSummaryOfBusinessResults"], instantIds),
@@ -302,14 +324,53 @@ export class EdinetXbrlObject {
      *
      * どのグループにも実コンテキストが無い場合のみ、レガシー/ハードコードされたID
      * （`legacyContextRefs`）を最終手段として試します。
+     *
+     * ただし、連結コンテキスト自体は存在していても、その企業が子会社を持たない等の理由で
+     * 中間・四半期の連結財務諸表を一切作成していない場合、そのコンテキストは
+     * カバーページの開示事項など非財務データにのみ紐付いており、財務諸表本表タクソノミ
+     * （jppfs_cor / jpigp_cor）のデータが1件も存在しないことがある。この場合は
+     * 「連結コンテキストは存在するが対象タグが無い」（issue #7）とは区別し、
+     * 単体側の財務諸表にフォールバックする。
      */
     private getNumberValue(keys: string[], [contextGroups, legacyContextRefs]: [string[][], string[]]): number | undefined {
         for (const group of contextGroups) {
             if (group.length === 0) continue;
+            // そのグループに財務諸表本表タクソノミのデータが1件も無い場合、
+            // このスコープの財務諸表自体が作成されていないとみなし、次のグループへ進む。
+            if (!this.hasFinancialStatementData(group)) continue;
             return this.getNumberValueFlat(keys, group);
         }
 
         return this.getNumberValueFlat(keys, legacyContextRefs);
+    }
+
+    /**
+     * 指定されたコンテキストID群のいずれかに、財務諸表本表タクソノミ
+     * （jppfs_cor: または IFRS用の jpigp_cor:）のデータが1件でも存在するかを判定します。
+     *
+     * 四半期・中間報告書のカバーページ等に使われる次元なしコンテキストは、
+     * 実際の財務諸表（連結）が作成されていない企業でも開示テキスト等に紐付くため
+     * 存在し得ます。これと「本当に連結財務諸表が作成されているコンテキスト」を
+     * 区別するために使用します。
+     */
+    private hasFinancialStatementData(contextIds: string[]): boolean {
+        if (contextIds.length === 0) return false;
+        const idSet = new Set(contextIds);
+        for (const [key, dataList] of this._dataMap) {
+            // jppfs_cor: 財務諸表本表（J-GAAP）、jpigp_cor: 財務諸表本表（IFRS）、
+            // "SummaryOfBusinessResults": 決算短信様式のサマリー情報（jpcrp_cor配下）。
+            // これら以外（jpdei_cor の提出者情報、jpcrp_cor の発行済株式数・保有割合など）は
+            // 財務諸表そのものではないため対象外とする。
+            const isFinancialTag =
+                key.startsWith("jppfs_cor:") ||
+                key.startsWith("jpigp_cor:") ||
+                key.includes("SummaryOfBusinessResults");
+            if (!isFinancialTag) continue;
+            for (const data of dataList) {
+                if (idSet.has(data.contextRef)) return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -319,11 +380,17 @@ export class EdinetXbrlObject {
      * 1株当たり指標・発行済株式数・配当・比率系など、決算短信様式の慣習上、
      * 連結決算を提出している企業でも値そのものが単体コンテキストにのみ記載される
      * 指標に使用します。連結を優先しつつ、見つからなければ単体の値も採用します。
+     *
+     * キーに ":" を含まない（名前空間を指定していない）場合は、タグ名のみで
+     * 名前空間に依存せず検索します。四半期・半期報告書で使われる企業独自の
+     * 名前空間拡張タグ（例: "BusinessRevenue"）に対応するためのものです。
      */
     private getNumberValueFlat(keys: string[], contextRefs: string[]): number | undefined {
         for (const contextRef of contextRefs) {
             for (const key of keys) {
-                const data = this.getDataByContextRef(key, contextRef);
+                const data = key.includes(":")
+                    ? this.getDataByContextRef(key, contextRef)
+                    : this.getDataByContextRefAnyNamespace(key, contextRef);
                 if (data && data.value) {
                     const parsed = parseFloat(data.value);
                     if (!isNaN(parsed)) return parsed;
@@ -565,8 +632,10 @@ export interface KeyMetrics {
     netSales?: number;
     /** 営業利益 */
     operatingIncome?: number;
-    /** 経常利益 */
+    /** 経常利益 (J-GAAP特有の概念。IFRS企業では通常undefined) */
     ordinaryIncome?: number;
+    /** 税引前利益 (J-GAAP・IFRS共通の概念。経常利益とは異なり特別損益を含む) */
+    profitBeforeTax?: number;
     /** 当期純利益 (親会社株主に帰属する当期純利益) */
     netIncome?: number;
     /** 純資産 */

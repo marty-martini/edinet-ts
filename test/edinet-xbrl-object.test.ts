@@ -143,12 +143,34 @@ describe("EdinetXbrlObject", () => {
             xbrlObject.addContext(consCtx);
             xbrlObject.addContext(nonConsCtx);
 
-            // 連結コンテキストには jppfs_cor:NetSales が存在せず（IFRS企業でよくあるケース）、
+            // 連結財務諸表自体は作成されている（jpigp_cor等、他の財務諸表タグが存在する）が、
+            // jppfs_cor:NetSales だけは連結コンテキストに存在せず（IFRS企業でよくあるケース）、
             // 単体コンテキストにのみ存在する状況を再現する。
+            xbrlObject.put("jpigp_cor:Assets", new EdinetData("jpigp_cor:Assets", "123456", 0, "JPY", "cons_2024"));
             xbrlObject.put("jppfs_cor:NetSales", new EdinetData("jppfs_cor:NetSales", "500", 0, "JPY", "non_2024"));
 
             const metrics = xbrlObject.getKeyMetrics();
             expect(metrics.netSales).toBeUndefined();
+        });
+
+        /**
+         * 子会社を持たない等の理由で連結財務諸表自体を作成していない企業（四半期・中間報告書に多い）では、
+         * 連結スコープのコンテキストは存在しても財務諸表本表タグが1件も無いため、
+         * 単体財務諸表の値へフォールバックできることを確認します。
+         */
+        it("falls back to NonConsolidated when Consolidated context has no financial statement data at all", () => {
+            const consCtx = { id: "cons_2024", period: { startDate: "2023-04-01", endDate: "2024-03-31" }, scope: "Consolidated", dimensions: [] } as any;
+            const nonConsCtx = { id: "non_2024", period: { startDate: "2023-04-01", endDate: "2024-03-31" }, scope: "NonConsolidated", dimensions: ["NonConsolidatedMember"] } as any;
+
+            xbrlObject.addContext(consCtx);
+            xbrlObject.addContext(nonConsCtx);
+
+            // cons_2024 には表紙の開示情報など、財務諸表本表ではない数値のみが紐付いている状況を再現する。
+            xbrlObject.put("jpcrp_cor:NumberOfSharesHeld", new EdinetData("jpcrp_cor:NumberOfSharesHeld", "1000", 0, "shares", "cons_2024"));
+            xbrlObject.put("jppfs_cor:NetSales", new EdinetData("jppfs_cor:NetSales", "500", 0, "JPY", "non_2024"));
+
+            const metrics = xbrlObject.getKeyMetrics();
+            expect(metrics.netSales).toBe(500);
         });
     });
 

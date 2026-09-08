@@ -32,7 +32,8 @@ export const KEY_METRICS_DOC: TypeDocumentation = {
         fields: [
             { key: "netSales", japaneseLabel: "売上高", type: "number (optional)" },
             { key: "operatingIncome", japaneseLabel: "営業利益", type: "number (optional)" },
-            { key: "ordinaryIncome", japaneseLabel: "経常利益", type: "number (optional)" },
+            { key: "ordinaryIncome", japaneseLabel: "経常利益 (J-GAAP特有の概念。IFRS企業では通常undefined)", type: "number (optional)" },
+            { key: "profitBeforeTax", japaneseLabel: "税引前利益 (J-GAAP・IFRS共通の概念。経常利益とは異なり特別損益を含む)", type: "number (optional)" },
             { key: "netIncome", japaneseLabel: "当期純利益 (親会社株主に帰属する当期純利益)", type: "number (optional)" },
             { key: "netAssets", japaneseLabel: "純資産", type: "number (optional)" },
             { key: "totalAssets", japaneseLabel: "総資産", type: "number (optional)" },
